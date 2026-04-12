@@ -26,6 +26,36 @@ const fetchAxios = axios.create({
 });
 
 describe.runIf(typeof fetch === 'function')('supports fetch with nodejs', () => {
+  it('should sanitize request headers containing CRLF characters', async () => {
+    const server = await startHTTPServer(
+      (req, res) => {
+        res.setHeader('Content-Type', 'application/json');
+        res.end(
+          JSON.stringify({
+            xTest: req.headers['x-test'],
+            injected: req.headers.injected ?? null,
+          })
+        );
+      },
+      {
+        port: SERVER_PORT,
+      }
+    );
+
+    try {
+      const { data } = await fetchAxios.get(`${LOCAL_SERVER_URL}/`, {
+        headers: {
+          'x-test': '\tok\r\nInjected: yes ',
+        },
+      });
+
+      assert.strictEqual(data.xTest, 'okInjected: yes');
+      assert.strictEqual(data.injected, null);
+    } finally {
+      await stopHTTPServer(server);
+    }
+  });
+
   describe('responses', () => {
     it('should support text response type', async () => {
       const originalData = 'my data';
@@ -535,6 +565,54 @@ describe.runIf(typeof fetch === 'function')('supports fetch with nodejs', () => 
 
       try {
         await fetchAxios.post(`http://localhost:${server.address().port}/form`, form);
+      } finally {
+        await stopHTTPServer(server);
+      }
+    });
+
+    it('should remove manually set Content-Type without boundary for FormData', async () => {
+      const form = new FormData();
+      form.append('foo', 'bar');
+
+      const server = await startHTTPServer(
+        (req, res) => {
+          const contentType = req.headers['content-type'];
+          assert.match(contentType, /^multipart\/form-data; boundary=/i);
+          res.end('OK');
+        },
+        { port: SERVER_PORT }
+      );
+
+      try {
+        await fetchAxios.post(`http://localhost:${server.address().port}/form`, form, {
+          headers: { 'Content-Type': 'multipart/form-data' },
+        });
+      } finally {
+        await stopHTTPServer(server);
+      }
+    });
+
+    it('should preserve Content-Type if it already has boundary', async () => {
+      const form = new FormData();
+      form.append('foo', 'bar');
+
+      const customBoundary = '----CustomBoundary123';
+
+      const server = await startHTTPServer(
+        (req, res) => {
+          const contentType = req.headers['content-type'];
+          assert.ok(contentType.includes(customBoundary));
+          res.end('OK');
+        },
+        { port: SERVER_PORT }
+      );
+
+      try {
+        await fetchAxios.post(`http://localhost:${server.address().port}/form`, form, {
+          headers: {
+            'Content-Type': `multipart/form-data; boundary=${customBoundary}`,
+          },
+        });
       } finally {
         await stopHTTPServer(server);
       }

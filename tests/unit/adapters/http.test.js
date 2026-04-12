@@ -15,7 +15,6 @@ import http from 'http';
 import https from 'https';
 import net from 'net';
 import stream from 'stream';
-import url from 'url';
 import zlib from 'zlib';
 import fs from 'fs';
 import os from 'os';
@@ -30,6 +29,7 @@ import getStream from 'get-stream';
 import bodyParser from 'body-parser';
 import { AbortController } from 'abortcontroller-polyfill/dist/cjs-ponyfill.js';
 import { lookup } from 'dns';
+import { EventEmitter } from 'events';
 
 const OPEN_WEB_PORT = 80;
 const SERVER_PORT = 8020;
@@ -121,6 +121,34 @@ describe('supports http with nodejs', () => {
           return true;
         }
       );
+    } finally {
+      await stopHTTPServer(server);
+    }
+  });
+
+  it('should sanitize request headers containing CRLF characters', async () => {
+    const server = await startHTTPServer(
+      (req, res) => {
+        res.setHeader('Content-Type', 'application/json');
+        res.end(
+          JSON.stringify({
+            xTest: req.headers['x-test'],
+            injected: req.headers.injected ?? null,
+          })
+        );
+      },
+      { port: SERVER_PORT }
+    );
+
+    try {
+      const { data } = await axios.get(`http://localhost:${server.address().port}/`, {
+        headers: {
+          'x-test': '\tok\r\nInjected: yes ',
+        },
+      });
+
+      assert.strictEqual(data.xTest, 'okInjected: yes');
+      assert.strictEqual(data.injected, null);
     } finally {
       await stopHTTPServer(server);
     }
@@ -492,7 +520,7 @@ describe('supports http with nodejs', () => {
           return;
         }
 
-        var parsed = url.parse(req.url);
+        var parsed = new URL(req.url, 'http://localhost');
         if (parsed.pathname === '/one') {
           res.setHeader('Location', '/two');
           res.statusCode = 302;
@@ -899,7 +927,7 @@ describe('supports http with nodejs', () => {
     const str = Array(100000).join('ж');
     const server = await startHTTPServer(
       (req, res) => {
-        const parsed = url.parse(req.url);
+        const parsed = new URL(req.url, 'http://localhost');
 
         if (parsed.pathname === '/two') {
           res.setHeader('Content-Type', 'text/html; charset=UTF-8');
@@ -1739,6 +1767,114 @@ describe('supports http with nodejs', () => {
     }
   });
 
+  it('should not use proxy for localhost with trailing dot when listed in no_proxy', async () => {
+    const originalHttpProxy = process.env.http_proxy;
+    const originalHTTPProxy = process.env.HTTP_PROXY;
+    const originalNoProxy = process.env.no_proxy;
+    const originalNOProxy = process.env.NO_PROXY;
+
+    let proxyRequests = 0;
+    const proxy = await startHTTPServer(
+      (_, response) => {
+        proxyRequests += 1;
+        response.end('proxied');
+      },
+      { port: PROXY_PORT }
+    );
+
+    const noProxyValue = 'localhost,127.0.0.1,::1';
+    const proxyUrl = `http://localhost:${proxy.address().port}/`;
+    process.env.http_proxy = proxyUrl;
+    process.env.HTTP_PROXY = proxyUrl;
+    process.env.no_proxy = noProxyValue;
+    process.env.NO_PROXY = noProxyValue;
+
+    try {
+      await assert.rejects(axios.get('http://localhost.:1/', { timeout: 100 }));
+      assert.equal(proxyRequests, 0, 'should not use proxy for localhost with trailing dot');
+    } finally {
+      await stopHTTPServer(proxy);
+
+      if (originalHttpProxy === undefined) {
+        delete process.env.http_proxy;
+      } else {
+        process.env.http_proxy = originalHttpProxy;
+      }
+
+      if (originalHTTPProxy === undefined) {
+        delete process.env.HTTP_PROXY;
+      } else {
+        process.env.HTTP_PROXY = originalHTTPProxy;
+      }
+
+      if (originalNoProxy === undefined) {
+        delete process.env.no_proxy;
+      } else {
+        process.env.no_proxy = originalNoProxy;
+      }
+
+      if (originalNOProxy === undefined) {
+        delete process.env.NO_PROXY;
+      } else {
+        process.env.NO_PROXY = originalNOProxy;
+      }
+    }
+  });
+
+  it('should not use proxy for bracketed IPv6 loopback when listed in no_proxy', async () => {
+    const originalHttpProxy = process.env.http_proxy;
+    const originalHTTPProxy = process.env.HTTP_PROXY;
+    const originalNoProxy = process.env.no_proxy;
+    const originalNOProxy = process.env.NO_PROXY;
+
+    let proxyRequests = 0;
+    const proxy = await startHTTPServer(
+      (_, response) => {
+        proxyRequests += 1;
+        response.end('proxied');
+      },
+      { port: PROXY_PORT }
+    );
+
+    const noProxyValue = 'localhost,127.0.0.1,::1';
+    const proxyUrl = `http://localhost:${proxy.address().port}/`;
+    process.env.http_proxy = proxyUrl;
+    process.env.HTTP_PROXY = proxyUrl;
+    process.env.no_proxy = noProxyValue;
+    process.env.NO_PROXY = noProxyValue;
+
+    try {
+      await assert.rejects(axios.get('http://[::1]:1/', { timeout: 100 }));
+      assert.equal(proxyRequests, 0, 'should not use proxy for IPv6 loopback');
+    } finally {
+      await stopHTTPServer(proxy);
+
+      if (originalHttpProxy === undefined) {
+        delete process.env.http_proxy;
+      } else {
+        process.env.http_proxy = originalHttpProxy;
+      }
+
+      if (originalHTTPProxy === undefined) {
+        delete process.env.HTTP_PROXY;
+      } else {
+        process.env.HTTP_PROXY = originalHTTPProxy;
+      }
+
+      if (originalNoProxy === undefined) {
+        delete process.env.no_proxy;
+      } else {
+        process.env.no_proxy = originalNoProxy;
+      }
+
+      if (originalNOProxy === undefined) {
+        delete process.env.NO_PROXY;
+      } else {
+        process.env.NO_PROXY = originalNOProxy;
+      }
+    }
+  });
+
   it('should use proxy for domains not in no_proxy', async () => {
     const originalHttpProxy = process.env.http_proxy;
     const originalHTTPProxy = process.env.HTTP_PROXY;
@@ -2503,7 +2639,7 @@ describe('supports http with nodejs', () => {
   });
 
   describe('URLEncoded Form', () => {
-    it('should post object data as url-encoded form if content-type is application/x-www-form-urlencoded', async () => {
+    it('should post object data as url-encoded form regardless of content-type header casing', async () => {
       const app = express();
       const obj = {
         arr1: ['1', '2', '3'],
@@ -2530,12 +2666,15 @@ describe('supports http with nodejs', () => {
       );
 
       try {
-        const response = await axios.post(`http://localhost:${server.address().port}/`, obj, {
-          headers: {
-            'content-type': 'application/x-www-form-urlencoded',
-          },
-        });
-        assert.deepStrictEqual(response.data, obj);
+        for (const headerName of ['content-type', 'Content-Type']) {
+          const response = await axios.post(`http://localhost:${server.address().port}/`, obj, {
+            headers: {
+              [headerName]: 'application/x-www-form-urlencoded',
+            },
+          });
+
+          assert.deepStrictEqual(response.data, obj);
+        }
       } finally {
         await new Promise((resolve, reject) => {
           server.close((error) => {
@@ -3696,6 +3835,60 @@ describe('supports http with nodejs', () => {
     }
   });
 
+  it('should reject when only the request socket emits an error', async () => {
+    const noop = () => {};
+    const socket = new EventEmitter();
+    socket.setKeepAlive = noop;
+    socket.on('error', noop);
+
+    const transport = {
+      request() {
+        return new (class MockRequest extends EventEmitter {
+          constructor() {
+            super();
+            this.destroyed = false;
+          }
+
+          setTimeout() {}
+
+          write() {}
+
+          end() {
+            this.emit('socket', socket);
+
+            setImmediate(() => {
+              socket.emit('error', Object.assign(new Error('write EPIPE'), { code: 'EPIPE' }));
+            });
+          }
+
+          destroy(err) {
+            if (this.destroyed) {
+              return;
+            }
+
+            this.destroyed = true;
+            err && this.emit('error', err);
+            this.emit('close');
+          }
+        })();
+      },
+    };
+
+    const error = await Promise.race([
+      axios.post('http://example.com/', 'test', {
+        transport,
+        maxRedirects: 0,
+      }),
+      setTimeoutAsync(200).then(() => {
+        throw new Error('socket error did not reject the request');
+      }),
+    ]).catch((err) => err);
+
+    assert.ok(error instanceof AxiosError);
+    assert.strictEqual(error.code, 'EPIPE');
+    assert.strictEqual(error.message, 'write EPIPE');
+  });
+
   describe('keep-alive', () => {
     it('should not fail with "socket hang up" when using timeouts', async () => {
       const server = await startHTTPServer(
@@ -3717,5 +3910,66 @@ describe('supports http with nodejs', () => {
         await stopHTTPServer(server);
       }
     }, 15000);
+
+    it('should remove request socket error listeners after keep-alive requests close', async () => {
+      const noop = () => {};
+      const socket = new EventEmitter();
+      socket.setKeepAlive = noop;
+      socket.on('error', noop);
+
+      const baseErrorListenerCount = socket.listenerCount('error');
+
+      const transport = {
+        request(_, cb) {
+          return new (class MockRequest extends EventEmitter {
+            constructor() {
+              super();
+              this.destroyed = false;
+            }
+
+            setTimeout() {}
+
+            write() {}
+
+            end() {
+              this.emit('socket', socket);
+
+              setImmediate(() => {
+                const response = stream.Readable.from(['ok']);
+                response.statusCode = 200;
+                response.headers = {};
+
+                cb(response);
+                this.emit('close');
+              });
+            }
+
+            destroy(err) {
+              if (this.destroyed) {
+                return;
+              }
+
+              this.destroyed = true;
+              err && this.emit('error', err);
+              this.emit('close');
+            }
+          })();
+        },
+      };
+
+      await axios.get('http://example.com/first', {
+        transport,
+        maxRedirects: 0,
+      });
+      await setTimeoutAsync(0);
+      assert.strictEqual(socket.listenerCount('error'), baseErrorListenerCount);
+
+      await axios.get('http://example.com/second', {
+        transport,
+        maxRedirects: 0,
+      });
+      await setTimeoutAsync(0);
+      assert.strictEqual(socket.listenerCount('error'), baseErrorListenerCount);
+    });
   });
 });
